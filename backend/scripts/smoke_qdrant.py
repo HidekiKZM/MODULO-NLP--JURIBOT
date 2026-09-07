@@ -1,20 +1,25 @@
-import os
-from sentence_transformers import SentenceTransformer
-from qdrant_client import QdrantClient
+"""Run from the repository root: python -m backend.scripts.smoke_qdrant."""
+from backend.core.config import get_settings
+from backend.core.runtime import create_qdrant_client
+from backend.rag.embeddings import load_embedding_model
 
-COL = os.getenv("QDRANT_COLLECTION","juribot_chunks")
-q = "prazo de arrependimento em compra online"
 
-model = SentenceTransformer(os.getenv("EMBEDDING_MODEL","sentence-transformers/all-MiniLM-L6-v2"))
-vec = model.encode(q).tolist()
+def main():
+    settings = get_settings()
+    model = load_embedding_model(settings)
+    vector = model.encode("prazo de arrependimento em compra online").tolist()
+    client = create_qdrant_client(settings)
+    try:
+        hits = client.search(
+            collection_name=settings.QDRANT_COLLECTION, query_vector=vector,
+            limit=5, with_payload=True,
+        )
+        for index, hit in enumerate(hits, 1):
+            payload = hit.payload or {}
+            print(index, round(hit.score, 4), payload.get("title"), payload.get("page"))
+    finally:
+        client.close()
 
-client = QdrantClient(
-    host=os.getenv("QDRANT_HOST","qdrant"),
-    port=int(os.getenv("QDRANT_PORT","6333")),
-    grpc_port=int(os.getenv("QDRANT_GRPC_PORT","6334")),
-    prefer_grpc=True
-)
 
-hits = client.search(collection_name=COL, query_vector=vec, limit=5, with_payload=True)
-for i, h in enumerate(hits, 1):
-    print(i, round(h.score,4), h.payload.get("title"), h.payload.get("page"), (h.payload.get("uri") or "")[:80])
+if __name__ == "__main__":
+    main()

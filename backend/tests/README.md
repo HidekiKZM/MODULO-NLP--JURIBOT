@@ -1,4 +1,25 @@
-# Validação de segurança — etapa 1
+# Testes de inicialização e segurança
+
+## API e ciclo de vida
+
+Use Python 3.11 e execute na raiz:
+
+```sh
+python -m pip install -r backend/requirements-test.txt
+python -B -m unittest discover -s backend/tests -p "test_*.py" -v
+```
+
+Os testes HTTP usam recursos simulados, sem baixar modelos, acessar Gemini ou
+alterar o Qdrant. Cobrem rotas, imports, configuração, CORS, fechamento dos
+clientes e prontidão com falhas de dependências. A CI também constrói a imagem
+completa e verifica suas dependências e imports sem rede.
+
+Para executar os nove casos da interface em jsdom, instale `jsdom@26.1.0` em
+uma pasta temporária, defina `NODE_PATH` para seu `node_modules` e execute
+`node backend/tests/run_ui_security.cjs`. Esse teste automatizado não substitui
+a conferência visual em navegador descrita abaixo.
+
+## Segurança sem dependências Python da API
 
 Execute na raiz do repositório. Não é necessário instalar as dependências da API,
 criar `.env`, baixar modelos nem iniciar containers.

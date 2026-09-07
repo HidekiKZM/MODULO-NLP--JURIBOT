@@ -1,10 +1,8 @@
 # Arquivo: backend/requirements.txt
 
 # --- Core Web Framework ---
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
-pydantic==2.7.1
-pydantic-settings==2.2.1
+-r requirements-api.txt
+packaging==24.2  # Compatible with langchain-core 0.2.x
 
 # --- RAG Core & LLMs ---
 google-generativeai==0.7.0
@@ -12,11 +10,9 @@ sentence-transformers==2.7.0
 rank-bm25==0.2.2
 
 # --- Conectores de Banco de Dados e Cache ---
-qdrant-client==1.9.2
 redis==5.0.4
 
 # --- Processamento de Documentos (Ingestão) ---
-python-dotenv==1.0.1
 pdfplumber==0.11.0
 
 # -- NOVAS DEPENDÊNCIAS DE INGESTÃO --
@@ -37,5 +33,6 @@ slowapi==0.1.9
 # --- Desenvolvimento e Testes ---
 pytest==8.2.1
 requests==2.31.0
+chardet==5.2.0  # Supported by requests 2.31.x
 
 

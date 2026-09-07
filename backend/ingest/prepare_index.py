@@ -2,7 +2,6 @@
 
 import hashlib
 import ftfy
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,9 +16,9 @@ from pdf2image import convert_from_path
 import pytesseract
 
 # Importa componentes do projeto
-from core.config import settings
-from rag.embeddings import EmbeddingGenerator
-from rag.vector_qdrant import QdrantManager
+from backend.core.config import get_settings
+from backend.rag.embeddings import EmbeddingGenerator
+from backend.rag.vector_qdrant import QdrantManager
 
 
 # ==========================
@@ -53,7 +52,7 @@ class PDFLoader:
         self.data_dir = Path(data_dir)
         self.ocr = ocr
         # Opcional: Definir caminho do poppler para Windows
-        self.poppler_path = poppler_path or os.environ.get("POPPLER_PATH")
+        self.poppler_path = poppler_path or get_settings().POPPLER_PATH
 
     def _extract_page_text(self, pdf: pdfplumber.PDF, page_idx: int) -> str:
         try:
@@ -250,7 +249,8 @@ def run_ingestion():
     print("🚀 Iniciando o processo de ingestão de documentos...")
 
     # A pasta de dados relativa à raiz do projeto (monte no Docker se for o caso)
-    data_path = Path("./data")
+    settings = get_settings()
+    data_path = settings.DATA_DIR
 
     # 1) Carrega documentos
     print(f"📂 Carregando documentos de '{data_path.resolve()}'...")
@@ -291,7 +291,7 @@ def run_ingestion():
     # 4) Upsert no Qdrant
     print("\n💾 Inserindo dados no banco vetorial Qdrant...")
     qdrant_manager = QdrantManager()
-    qdrant_manager.ensure_collection_exists()
+    qdrant_manager.ensure_collection_exists(vector_size=dim)
     qdrant_manager.upsert_points(vectors=embeddings, payloads=payloads)
     print("✅ Dados inseridos no Qdrant com sucesso!")
 
@@ -299,6 +299,5 @@ def run_ingestion():
 
 
 if __name__ == "__main__":
-    # Execução direta: python backend/ingest/prepare_index.py
-    # ou             : python -m ingest.prepare_index  (ajuste o pacote conforme sua estrutura)
+    # A partir da raiz: python -m backend.ingest.prepare_index
     run_ingestion()

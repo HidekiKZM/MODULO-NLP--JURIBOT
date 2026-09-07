@@ -1,25 +1,14 @@
 # rag/vector_qdrant.py
-import os
 import uuid
-from qdrant_client import QdrantClient
+from backend.core.config import get_settings
+from backend.core.runtime import create_qdrant_client
 from qdrant_client.models import Distance, VectorParams
 
 class QdrantManager:
     def __init__(self, collection_name: str | None = None):
-        self.collection = collection_name or os.getenv("QDRANT_COLLECTION", "juribot_chunks")
-        host = os.getenv("QDRANT_HOST", "qdrant")
-        port = int(os.getenv("QDRANT_PORT", "6333"))
-        grpc_port = int(os.getenv("QDRANT_GRPC_PORT", "6334"))
-        prefer_grpc = os.getenv("QDRANT_USE_GRPC", "true").lower() == "true"
-        timeout = float(os.getenv("QDRANT_TIMEOUT", "180"))
-
-        self.client = QdrantClient(
-            host=host,
-            port=port,
-            grpc_port=grpc_port,
-            prefer_grpc=prefer_grpc,
-            timeout=timeout,
-        )
+        self.settings = get_settings()
+        self.collection = collection_name or self.settings.QDRANT_COLLECTION
+        self.client = create_qdrant_client(self.settings)
 
     def ensure_collection_exists(self, vector_size: int = 384):
         try:
@@ -34,8 +23,8 @@ class QdrantManager:
             print("INFO: Coleção criada com sucesso.")
 
     def upsert_points(self, vectors, payloads):
-        batch_size = int(os.getenv("QDRANT_BATCH_SIZE", "256"))
-        parallel = int(os.getenv("QDRANT_PARALLEL", "2"))
+        batch_size = self.settings.QDRANT_BATCH_SIZE
+        parallel = self.settings.QDRANT_PARALLEL
 
         # ✅ IDs estáveis como UUID v5 (válidos para o Qdrant)
         ids = [

@@ -1,0 +1,50 @@
+name: Juribot CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install lightweight API test dependencies
+        run: python -m pip install -r backend/requirements-test.txt
+      - name: Validate Compose without a credentials file
+        run: make config
+      - name: API, startup and security tests
+        run: python -B -m unittest discover -s backend/tests -p 'test_*.py' -v
+      - name: UI security tests in an isolated DOM
+        run: |
+          npm install --prefix "$RUNNER_TEMP/juribot-ui-tests" --no-save --package-lock=false --ignore-scripts --no-audit --no-fund jsdom@26.1.0
+          NODE_PATH="$RUNNER_TEMP/juribot-ui-tests/node_modules" node backend/tests/run_ui_security.cjs
+
+  backend-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: tests
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend
+        run: docker build -t juribot-api:ci -f backend/Dockerfile backend
+      - name: Validate dependency resolution
+        run: docker run --rm --network none juribot-api:ci python -m pip check
+      - name: Verify real startup without network, model cache or Gemini key
+        run: |
+          docker run --rm --network none -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
+            --mount "type=bind,source=$PWD/backend/tests/smoke_image.py,target=/tmp/smoke_image.py,readonly" \
+            juribot-api:ci python -B /tmp/smoke_image.py

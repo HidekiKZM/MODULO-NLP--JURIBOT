@@ -1,19 +1,5 @@
-# Importa a biblioteca oficial do Google para interagir com a API do Gemini
-import google.generativeai as genai
-# Importa as configurações do projeto, como a chave da API e o nome do modelo
-from core.config import settings
-
-# --- Configuração Inicial do SDK do Gemini ---
-# Esta seção configura a chave da API para autenticação com os serviços do Google.
-# Usar um bloco try-except é uma boa prática para capturar erros de conexão ou
-# problemas com a chave da API logo na inicialização.
-try:
-    # A função configure() prepara a biblioteca para fazer chamadas à API.
-    genai.configure(api_key=settings.GEMINI_API_KEY)
-except Exception as e:
-    # Se a chave não for válida ou não for encontrada, um erro será impresso.
-    # Em uma aplicação real, seria ideal usar um sistema de logging (ex: logging.error).
-    print(f"Erro ao configurar a API do Gemini: {e}")
+from backend.core.config import get_settings
+from backend.core.runtime import create_gemini_model
 
 
 class GeminiGenerator:
@@ -29,7 +15,7 @@ class GeminiGenerator:
         """
         # Carrega o modelo generativo especificado nas configurações (ex: 'gemini-1.5-flash').
         # O objeto 'self.model' será usado para fazer as chamadas à API.
-        self.model = genai.GenerativeModel(settings.GEMINI_MODEL)
+        self.model = create_gemini_model(get_settings())
 
     def _build_prompt(self, question: str, context: str) -> str:
         """

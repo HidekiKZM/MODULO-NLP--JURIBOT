@@ -14,6 +14,11 @@ ENV PIP_NO_CACHE_DIR=1 \
 
 WORKDIR /app
 
+# Isolate dependencies from packages preinstalled in the base image.
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN python -m venv /opt/venv
+
 # Dependências do sistema (para compilar libs Python)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -21,8 +26,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 # Instala dependências Python (com cache em layer separado)
-COPY requirements.txt .
+COPY requirements*.txt ./
+ARG TORCH_VERSION=2.10.0
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+ && pip install --no-cache-dir torch==${TORCH_VERSION} --index-url https://download.pytorch.org/whl/cpu \
  && pip install --no-cache-dir -r requirements.txt
 
 
@@ -45,17 +52,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 # Copia as libs do builder (Python já com dependências)
-COPY --from=builder /usr/local /usr/local
+COPY --from=builder /opt/venv /opt/venv
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 # Copia o código do backend
-COPY . .
+COPY . ./backend
 
 # Define usuário não-root (boa prática de segurança)
-RUN useradd -m appuser && chown -R appuser /app
+RUN useradd -m appuser && mkdir -p /home/appuser/.cache \
+ && chown -R appuser /app /home/appuser/.cache
 USER appuser
 
 # Porta exposta (FastAPI)
 EXPOSE 8000
 
 # CMD padrão (docker-compose pode sobrescrever)
-CMD ["uvicorn", "app_main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "backend.app_main:app", "--host", "0.0.0.0", "--port", "8000"]
