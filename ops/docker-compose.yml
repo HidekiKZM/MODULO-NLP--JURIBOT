@@ -1,4 +1,5 @@
-# ops/docker-compose.yml
+# ops/docker-compose.yml (Docker Compose >= 2.24)
+name: juribot
 
 
 services:
@@ -9,20 +10,31 @@ services:
       dockerfile: Dockerfile
     container_name: juribot-api
     # O comando para iniciar a API com Uvicorn, permitindo recarga automática
-    command: uvicorn app_main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn backend.app_main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       # Mapeia o código do backend para dentro do container para refletir mudanças ao vivo
-      - ../backend:/app
+      - ../backend:/app/backend
       # Mapeia a pasta de dados para que a API possa acessá-la para ingestão
       - ../data:/app/data
+      - embedding_cache:/home/appuser/.cache
     ports:
-      # Expõe a porta 8000 do container para a porta 8000 da máquina host
-      - "8000:8000"
+      # Disponível apenas no host durante a estabilização
+      - "127.0.0.1:8000:8000"
     env_file:
       # Carrega as variáveis de ambiente do arquivo .env na raiz do projeto
-      - ../.env
+      - path: ../.env
+        required: false
+    environment:
+      # No Docker, o banco usa DNS interno; fora dele, Settings usa localhost.
+      QDRANT_HOST: qdrant
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=5)"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 120s
     depends_on:
-      # A API só iniciará depois que o Qdrant e o Redis estiverem prontos
+      # Ordena a partida; a prontidão real das dependências é verificada em /ready.
       - qdrant
       - redis
     networks:
@@ -30,6 +42,8 @@ services:
 
   # Serviço do Frontend (Next.js)
   frontend:
+    # Opcional durante a estabilização da API e da interface HTML
+    profiles: ["frontend"]
     build:
       context: ../frontend
       dockerfile: Dockerfile
@@ -42,8 +56,7 @@ services:
       # Evita que a pasta node_modules local seja mapeada, usando a do container
       - /app/node_modules
     ports:
-      # Expõe a porta 3000 do container para a porta 3000 da máquina host
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     networks:
       - juribot-net
     depends_on:
@@ -53,9 +66,7 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.9.2
     container_name: juribot-qdrant
-    ports:
-      - "6333:6333"
-      - "6334:6334"
+    # Sem publicação de portas: acesso pela rede do Compose
     volumes:
       # Garante que os dados do Qdrant persistam mesmo se o container for recriado
       - qdrant_data:/qdrant/storage
@@ -66,8 +77,7 @@ services:
   redis:
     image: redis:7.2-alpine
     container_name: juribot-redis
-    ports:
-      - "6379:6379"
+    # Sem publicação de portas: acesso pela rede do Compose
     volumes:
       # Garante que os dados do Redis persistam
       - redis_data:/data
@@ -104,4 +114,5 @@ networks:
 volumes:
   qdrant_data:
   redis_data:
+  embedding_cache:
 #  opensearch_data: # Descomente se usar OpenSearch

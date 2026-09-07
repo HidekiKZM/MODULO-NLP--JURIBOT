@@ -1,179 +1,96 @@
-# backend/app_main.py
-from __future__ import annotations
+"""Run from the repository root: python -m uvicorn backend.app_main:app."""
+from contextlib import asynccontextmanager
+from typing import Callable
 
-import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
-from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer
-from qdrant_client import QdrantClient
+from pydantic import BaseModel, Field
+
+# Required routes use explicit imports: an import failure must stop startup.
+from backend.api.routers_chat import router as chat_router
+from backend.api.routes_classify import router as classify_router
+from backend.core.config import Settings, UI_DIR, get_settings
+from backend.core.runtime import Runtime, SearchUnavailable, load_runtime
+from backend.services.router import RAGRouter
 
 
-def create_app() -> FastAPI:
-    """Cria a aplicação FastAPI com CORS e /health."""
-    app = FastAPI(
-        title="Juribot API",
-        version="0.1.0",
-        docs_url="/docs",
-        redoc_url="/redoc",
-    )
+class SearchReq(BaseModel):
+    query: str = Field(min_length=1, max_length=10000)
+    top_k: int = Field(default=5, ge=1, le=20)
 
-    # CORS básico (ajuste em produção)
+
+def create_app(
+    settings: Settings | None = None,
+    resource_loader: Callable[[Settings], Runtime] = load_runtime,
+) -> FastAPI:
+    config = settings if settings is not None else get_settings()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        runtime = await run_in_threadpool(resource_loader, config)
+        app.state.runtime = runtime
+        app.state.rag_router = RAGRouter(runtime.model, runtime.qdrant)
+        try:
+            yield
+        finally:
+            await run_in_threadpool(runtime.close)
+            app.state.runtime = None
+            app.state.rag_router = None
+
+    app = FastAPI(title="Juribot API", version="0.1.0", lifespan=lifespan)
+    app.state.settings = config
+    app.state.runtime = None
+
+    # Somente interfaces locais durante a estabilização, sem cookies de terceiros.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=[
+            "http://localhost:8000", "http://127.0.0.1:8000",
+            "http://localhost:3000", "http://127.0.0.1:3000",
+        ],
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
     )
+    app.include_router(chat_router)
+    app.include_router(classify_router)
+    app.mount("/ui", StaticFiles(directory=UI_DIR, html=True), name="ui")
+
+    @app.get("/", include_in_schema=False)
+    def home():
+        return RedirectResponse(url="/ui/")
 
     @app.get("/health", tags=["system"])
     def health():
+        """Liveness: the process responds, regardless of external dependencies."""
         return {"status": "ok"}
+
+    @app.get("/ready", tags=["system"])
+    def ready(request: Request):
+        """Readiness: resources loaded, Qdrant reachable, compatible nonempty index."""
+        runtime = request.app.state.runtime
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"status": "not_ready", "checks": {"startup": "pending"}})
+        is_ready, checks = runtime.readiness(config)
+        return JSONResponse(
+            status_code=200 if is_ready else 503,
+            content={"status": "ready" if is_ready else "not_ready", "checks": checks},
+        )
+
+    @app.post("/search", tags=["search"])
+    def search(req: SearchReq, request: Request):
+        runtime = request.app.state.runtime
+        if runtime is None:
+            raise HTTPException(status_code=503, detail="Inicialização pendente")
+        try:
+            return runtime.search(config, req.query, req.top_k)
+        except SearchUnavailable as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
 
     return app
 
 
-# -----------------------------------------------------------------------------
-# App
-# -----------------------------------------------------------------------------
 app = create_app()
-
-# -----------------------------------------------------------------------------
-# Rotas externas opcionais (/chat, /classify)
-# -----------------------------------------------------------------------------
-def _include_chat_router(app):
-    # tenta "api.routers_chat" quando o WORKDIR é /app/backend
-    try:
-        from api.routers_chat import router as chat_router
-        app.include_router(chat_router)
-        print("[BOOT] /chat incluído via api.routers_chat")
-        return
-    except Exception as e:
-        print(f"[WARN] /chat não incluído por api.routers_chat: {e}")
-
-    # fallback: quando o Python path espera backend.api.routers_chat
-    try:
-        from backend.api.routers_chat import router as chat_router
-        app.include_router(chat_router)
-        print("[BOOT] /chat incluído via backend.api.routers_chat")
-        return
-    except Exception as e:
-        print(f"[WARN] /chat não incluído por backend.api.routers_chat: {e}")
-
-_include_chat_router(app)
-
-def _include_classify_router(app):
-    try:
-        from api.routes_classify import router as classify_router
-        app.include_router(classify_router)
-        print("[BOOT] /classify incluído via api.routes_classify")
-        return
-    except Exception as e:
-        print(f"[WARN] /classify não incluído por api.routes_classify: {e}")
-
-    try:
-        from backend.api.routes_classify import router as classify_router
-        app.include_router(classify_router)
-        print("[BOOT] /classify incluído via backend.api.routes_classify")
-        return
-    except Exception as e:
-        print(f"[WARN] /classify não incluído por backend.api.routes_classify: {e}")
-
-_include_classify_router(app)
-
-
-# -----------------------------------------------------------------------------
-# Boot de dependências (carregadas 1x em app.state)
-# -----------------------------------------------------------------------------
-# Descoberta de device para embeddings
-_device = os.getenv("EMBEDDING_DEVICE", "auto").lower()
-if _device == "auto":
-    try:
-        import torch  # type: ignore
-        _device = "cuda" if torch.cuda.is_available() else "cpu"
-        _cuda_name = torch.cuda.get_device_name(0) if _device == "cuda" else "N/A"
-    except Exception:
-        _device, _cuda_name = "cpu", "N/A"
-else:
-    _cuda_name = "N/A"
-
-# SentenceTransformer (encoder) — carrega uma única vez
-if not hasattr(app.state, "model"):
-    _model_id = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-    app.state.model = SentenceTransformer(_model_id, device=_device)
-    print(f"[BOOT] Embeddings: {_model_id} | device={_device} | CUDA={_cuda_name}")
-
-# Qdrant client — carrega uma única vez
-if not hasattr(app.state, "qdrant"):
-    app.state.qdrant = QdrantClient(
-        host=os.getenv("QDRANT_HOST", "qdrant"),
-        port=int(os.getenv("QDRANT_PORT", "6333")),
-        grpc_port=int(os.getenv("QDRANT_GRPC_PORT", "6334")),
-        prefer_grpc=os.getenv("QDRANT_USE_GRPC", "true").lower() == "true",
-        timeout=float(os.getenv("QDRANT_TIMEOUT", "180")),
-    )
-    print(
-        "[BOOT] Qdrant:",
-        os.getenv("QDRANT_HOST", "qdrant"),
-        os.getenv("QDRANT_PORT", "6333"),
-        os.getenv("QDRANT_GRPC_PORT", "6334"),
-        "| prefer_grpc=" + str(os.getenv("QDRANT_USE_GRPC", "true")),
-    )
-
-# -----------------------------------------------------------------------------
-# Rotas externas opcionais (/chat, /classify)
-# -----------------------------------------------------------------------------
-try:
-    from api.routers_chat import router as chat_router  # seu existente
-    app.include_router(chat_router)
-except Exception as e:
-    print(f"[WARN] /chat não incluído: {e}")
-
-try:
-    from api.routes_classify import router as classify_router  # se existir
-    app.include_router(classify_router)
-except Exception as e:
-    print(f"[WARN] /classify não incluído: {e}")
-
-# -----------------------------------------------------------------------------
-# UI estática e redirect raiz
-# -----------------------------------------------------------------------------
-if os.path.isdir("ui"):
-    app.mount("/ui", StaticFiles(directory="ui", html=True), name="ui")
-
-@app.get("/", include_in_schema=False)
-def home():
-    return RedirectResponse(url="/ui/") if os.path.isdir("ui") else RedirectResponse(url="/docs")
-
-# -----------------------------------------------------------------------------
-# /search (RAG simples)
-# -----------------------------------------------------------------------------
-class SearchReq(BaseModel):
-    query: str
-    top_k: int = 5
-
-@app.post("/search", tags=["search"])
-def search(req: SearchReq):
-    vec = app.state.model.encode(req.query).tolist()
-    hits = app.state.qdrant.search(
-        collection_name=os.getenv("QDRANT_COLLECTION", "juribot_chunks"),
-        query_vector=vec,
-        limit=req.top_k,
-        with_payload=True,
-    )
-    results = []
-    for h in hits:
-        payload = h.payload or {}
-        results.append(
-            {
-                "score": float(h.score),
-                "title": payload.get("title"),
-                "page": payload.get("page"),
-                "uri": payload.get("uri"),
-                "snippet": (payload.get("content") or "")[:400],
-            }
-        )
-    return results

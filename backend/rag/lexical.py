@@ -1,7 +1,7 @@
 # Arquivo: backend/rag/lexical.py
 
 from rank_bm25 import BM25Okapi
-from core.config import settings
+from backend.core.config import get_settings
 
 class LexicalSearch:
     """
@@ -11,7 +11,7 @@ class LexicalSearch:
     A integração com OpenSearch seria uma expansão desta classe.
     """
     def __init__(self):
-        self.use_opensearch = settings.USE_OPENSEARCH
+        self.use_opensearch = get_settings().USE_OPENSEARCH
         self.in_memory_index = None
         self.documents = []
 
