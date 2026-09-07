@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="pt-br">
+<meta charset="utf-8">
+<title>Juribot — testes de segurança da interface</title>
+<h1>Segurança da interface HTML</h1>
+<p id="summary">Executando...</p>
+<ol id="results"></ol>
+<iframe id="fixture" title="Interface sob teste" hidden></iframe>
+<script>
+  // Execute via HTTP local. Usa o HTML real, sem CDN nem chamadas ao Gemini.
+  const results = document.getElementById('results');
+  let passed = 0;
+  let failed = 0;
+
+  function assert(condition, message) {
+    if (!condition) throw new Error(message);
+  }
+
+  async function test(name, run) {
+    const item = document.createElement('li');
+    try {
+      await run();
+      passed++;
+      item.textContent = `PASS: ${name}`;
+    } catch (error) {
+      failed++;
+      item.textContent = `FAIL: ${name}: ${error.message}`;
+    }
+    results.appendChild(item);
+  }
+
+  async function loadUi() {
+    const response = await fetch('../ui/index.html');
+    assert(response.ok, 'Não foi possível carregar a interface');
+    const html = await response.text();
+    const parsed = new DOMParser().parseFromString(html, 'text/html');
+    parsed.querySelectorAll('script[src]').forEach(script => script.remove());
+    const iframe = document.getElementById('fixture');
+    await new Promise(resolve => {
+      iframe.onload = resolve;
+      iframe.srcdoc = '<!doctype html>' + parsed.documentElement.outerHTML;
+    });
+    return iframe.contentWindow;
+  }
+
+  async function main() {
+    const ui = await (window.loadUiForTest || loadUi)();
+    const doc = ui.document;
+    const answer = doc.getElementById('answer');
+    const sources = doc.getElementById('sources');
+    const payload = '<img src=x onerror="window.__xss=true"><svg onload="window.__xss=true"></svg><script>window.__xss=true<\/script>';
+
+    await test('HTML e scripts da IA permanecem texto literal', () => {
+      ui.renderAnswer(payload, 0);
+      assert(answer.textContent === payload, 'Texto da resposta foi alterado');
+      assert(answer.children.length === 0, 'Conteúdo da IA criou elementos HTML');
+      assert(!ui.__xss, 'Código da resposta foi executado');
+    });
+
+    await test('Citações válidas preservam texto, quebras de linha e destino', () => {
+      const text = `Primeira linha [1]\n${payload} [2] [0] [99999999999999999999]`;
+      ui.renderSources([{ title: 'Documento', page: 2 }]);
+      ui.renderAnswer(text, 1);
+      assert(answer.textContent === text, 'Texto ou quebras de linha foram perdidos');
+      const links = answer.querySelectorAll('a');
+      assert(links.length === 1, 'Citação inexistente virou link');
+      assert(links[0].getAttribute('href') === '#src-1', 'Destino incorreto');
+      assert(doc.getElementById('src-1'), 'Cartão da fonte não existe');
+      assert(!answer.querySelector('img, svg, script'), 'Resposta criou HTML ativo');
+    });
+
+    await test('Título, trecho e URI das fontes não injetam HTML', () => {
+      ui.renderSources([{ title: payload, snippet: payload, uri: 'javascript:alert(1)', page: payload }]);
+      assert(sources.textContent.includes(payload), 'Conteúdo não aparece como texto');
+      assert(!sources.querySelector('img, svg, script, a'), 'Fonte criou HTML ou link perigoso');
+    });
+
+    await test('Protocolos perigosos, caminhos locais e URLs inválidas são rejeitados', () => {
+      const denied = [
+        'javascript:alert(1)', 'JaVaScRiPt:alert(1)', 'java\nscript:alert(1)',
+        'data:text/html,<svg onload=alert(1)>', 'vbscript:msgbox(1)',
+        'file:///etc/passwd', 'blob:https://example.org/id', '//example.org/doc',
+        'data/CDC.pdf', '/app/data/CDC.pdf', 'C:\\data\\CDC.pdf',
+        'https://', 'https://user:password@example.org/doc',
+        'https://example.org/\u0000doc', null, {}, 42,
+      ];
+      for (const uri of denied) {
+        assert(ui.safeSourceUrl(uri) === null, `URL aceita: ${String(uri)}`);
+        ui.renderSources([{ uri }]);
+        assert(!sources.querySelector('a'), `Link criado: ${String(uri)}`);
+      }
+    });
+
+    await test('Links HTTP/HTTPS válidos abrem sem acesso à janela de origem', () => {
+      for (const uri of ['https://example.org/documento?q=CDC#p2', 'http://localhost:8000/docs']) {
+        ui.renderSources([{ title: 'Fonte', uri }]);
+        const link = sources.querySelector('a');
+        assert(link && link.href === new URL(uri).href, 'URL válida rejeitada ou alterada');
+        assert(link.target === '_blank', 'Destino da janela incorreto');
+        assert(link.relList.contains('noopener') && link.relList.contains('noreferrer'), 'Proteção da janela ausente');
+      }
+    });
+
+    await test('Aspas na URL não criam atributos ou eventos', () => {
+      ui.renderSources([{ uri: 'https://example.org/" onclick="window.__xss=true' }]);
+      const link = sources.querySelector('a');
+      assert(link && !link.hasAttribute('onclick'), 'URL escapou do atributo href');
+      assert(!link.href.includes('"'), 'URL não foi normalizada');
+    });
+
+    await test('Novas respostas removem conteúdo e fontes anteriores', () => {
+      ui.renderSources([{ title: 'Antiga', uri: 'https://example.org' }]);
+      ui.renderAnswer('Antiga [1]', 1);
+      ui.renderSources([]);
+      ui.renderAnswer('Nova [1]', 0);
+      assert(!sources.textContent.includes('Antiga') && !sources.querySelector('a'), 'Fonte antiga permaneceu');
+      assert(answer.textContent === 'Nova [1]' && !answer.querySelector('a'), 'Resposta antiga permaneceu');
+    });
+
+    await test('Dados ausentes ou malformados têm apresentação segura', () => {
+      ui.renderSources([null, { title: 42, snippet: {}, uri: [] }]);
+      ui.renderAnswer({ unexpected: true }, 2);
+      assert(answer.textContent.includes('Sem resposta'), 'Fallback de resposta ausente');
+      ui.renderSources({ unexpected: true });
+      assert(sources.textContent === 'Sem fontes.', 'Fallback de fontes ausente');
+    });
+
+    await test('Fluxo de consulta renderiza JSON malicioso com segurança', async () => {
+      let request;
+      ui.fetch = async (url, options) => {
+        request = { url, options };
+        return { ok: true, json: async () => ({ answer: payload + ' [1]', sources: [{ title: payload, uri: 'javascript:alert(1)' }] }) };
+      };
+      doc.getElementById('question').value = 'Pergunta de teste';
+      await ui.ask();
+      assert(request.url === '/chat', 'Endpoint incorreto');
+      assert(JSON.parse(request.options.body).question === 'Pergunta de teste', 'Pergunta incorreta');
+      assert(answer.textContent === payload + ' [1]', 'Resposta não preservada');
+      assert(!doc.querySelector('#answer img, #answer svg, #sources img, #sources a'), 'HTML ativo renderizado');
+      assert(!ui.__xss, 'Código malicioso executado');
+      assert(doc.getElementById('status').textContent === 'Pronto.', 'Consulta não terminou');
+      assert(!doc.getElementById('askBtn').disabled, 'Botão permaneceu desabilitado');
+    });
+
+    document.getElementById('summary').textContent = `${passed} passaram; ${failed} falharam.`;
+    document.documentElement.dataset.testStatus = failed ? 'failed' : 'passed';
+  }
+
+  main().catch(error => {
+    document.getElementById('summary').textContent = `Falha no teste: ${error.message}`;
+    document.documentElement.dataset.testStatus = 'failed';
+  });
+</script>
+</html>

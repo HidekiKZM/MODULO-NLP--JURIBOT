@@ -7,6 +7,7 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     .prose p { margin-bottom: .75rem; }
+    #answer { white-space: pre-wrap; overflow-wrap: anywhere; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
   </style>
 </head>
@@ -57,42 +58,89 @@
   <script>
     const el = (id) => document.getElementById(id);
 
-    function escapeHtml(s) {
-      return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+    function textElement(tag, className, text) {
+      const node = document.createElement(tag);
+      node.className = className;
+      node.textContent = text;
+      return node;
+    }
+
+    function safeSourceUrl(value) {
+      if (typeof value !== 'string' || /[\u0000-\u001f\u007f]/.test(value)) return null;
+      const uri = value.trim();
+      // PDFs locais continuam como texto até existir uma rota de documentos.
+      if (!/^https?:\/\//i.test(uri)) return null;
+      try {
+        const url = new URL(uri);
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null;
+        return url.href;
+      } catch {
+        return null;
+      }
     }
 
     function renderSources(list) {
       const wrap = el('sources');
-      wrap.innerHTML = '';
-      if (!list || !list.length) { wrap.innerHTML = '<p class="text-gray-500">Sem fontes.</p>'; return; }
-      list.forEach((s, idx) => {
-        const uri = s.uri || '';
-        const page = (s.page ?? '') !== '' ? `p.${s.page}` : '';
-        const title = s.title || uri.split('/').pop() || 'Fonte';
-        const snippet = (s.snippet || '').slice(0, 600);
+      wrap.replaceChildren();
+      if (!Array.isArray(list) || !list.length) {
+        wrap.appendChild(textElement('p', 'text-gray-500', 'Sem fontes.'));
+        return;
+      }
+      list.forEach((source, idx) => {
+        const s = source && typeof source === 'object' ? source : {};
+        const uri = typeof s.uri === 'string' ? s.uri : '';
+        const page = Number.isInteger(s.page) && s.page > 0 ? `p.${s.page}` : '';
+        const title = typeof s.title === 'string' && s.title ? s.title : uri.split('/').pop() || 'Fonte';
+        const snippet = typeof s.snippet === 'string' ? s.snippet.slice(0, 600) : '';
         const card = document.createElement('div');
+        card.id = `src-${idx+1}`;
         card.className = 'border rounded-xl p-4';
-        card.innerHTML = `
-          <div class="flex items-center justify-between gap-3">
-            <div class="font-medium"><span class="text-emerald-600">[${idx+1}]</span> ${escapeHtml(title)} <span class="text-gray-500 text-sm">${escapeHtml(page)}</span></div>
-            ${uri ? `<a class="text-emerald-700 hover:underline text-sm" href="${encodeURI(uri)}" target="_blank" rel="noreferrer">abrir</a>` : ''}
-          </div>
-          <p class="text-gray-700 mt-2 whitespace-pre-wrap">${escapeHtml(snippet)}</p>
-          ${uri ? `<div class="text-xs text-gray-500 mt-1 mono break-all">${escapeHtml(uri)}</div>` : ''}
-        `;
+        const header = document.createElement('div');
+        header.className = 'flex items-center justify-between gap-3';
+        const heading = document.createElement('div');
+        heading.className = 'font-medium';
+        heading.append(
+          textElement('span', 'text-emerald-600', `[${idx+1}]`),
+          document.createTextNode(` ${title} `),
+          textElement('span', 'text-gray-500 text-sm', page)
+        );
+        header.appendChild(heading);
+        const href = safeSourceUrl(uri);
+        if (href) {
+          const link = textElement('a', 'text-emerald-700 hover:underline text-sm', 'abrir');
+          link.href = href;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          header.appendChild(link);
+        }
+        card.append(header, textElement('p', 'text-gray-700 mt-2 whitespace-pre-wrap', snippet));
+        if (uri) card.appendChild(textElement('div', 'text-xs text-gray-500 mt-1 mono break-all', uri));
         wrap.appendChild(card);
       });
     }
 
-    function linkifyCitations(answer, sourcesLen) {
-      // transforma [1], [2]... em âncoras
-      return answer.replace(/\[(\d+)\]/g, (m, n) => {
-        const i = parseInt(n,10);
-        if (i>=1 && i<=sourcesLen) {
-          return `<a href="#src-${i}" class="text-emerald-700 underline">[${i}]</a>`;
+    function renderAnswer(answer, sourcesLen) {
+      const wrap = el('answer');
+      wrap.replaceChildren();
+      if (typeof answer !== 'string' || !answer.trim()) {
+        wrap.appendChild(textElement('span', 'text-gray-500', 'Sem resposta da LLM. Veja as fontes abaixo.'));
+        return;
+      }
+      // Apenas referências válidas viram links; todo o conteúdo da IA é texto.
+      let offset = 0;
+      for (const match of answer.matchAll(/\[(\d+)\]/g)) {
+        wrap.appendChild(document.createTextNode(answer.slice(offset, match.index)));
+        const i = Number(match[1]);
+        if (Number.isSafeInteger(i) && i >= 1 && i <= sourcesLen) {
+          const link = textElement('a', 'text-emerald-700 underline', match[0]);
+          link.href = `#src-${i}`;
+          wrap.appendChild(link);
+        } else {
+          wrap.appendChild(document.createTextNode(match[0]));
         }
-        return m;
-      });
+        offset = match.index + match[0].length;
+      }
+      wrap.appendChild(document.createTextNode(answer.slice(offset)));
     }
 
     async function ask() {
@@ -112,14 +160,9 @@
         if (!resp.ok) throw new Error('Falha na requisição');
         const data = await resp.json();
 
-        const sources = data.sources || [];
-        const answerHtml = linkifyCitations((data.answer || '').replace(/\n/g, '<br>'), sources.length);
-        el('answer').innerHTML = answerHtml || '<span class="text-gray-500">Sem resposta da LLM. Veja as fontes abaixo.</span>';
-
-        // render fontes e adicionar ids para âncoras [1] [2]...
+        const sources = Array.isArray(data.sources) ? data.sources : [];
         renderSources(sources);
-        // coloca ids nos cartões para âncoras
-        Array.from(el('sources').children).forEach((div, i) => div.id = `src-${i+1}`);
+        renderAnswer(data.answer, sources.length);
 
         el('result').classList.remove('hidden');
         el('status').textContent = 'Pronto.';

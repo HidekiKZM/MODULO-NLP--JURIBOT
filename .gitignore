@@ -77,7 +77,6 @@ __MACOSX/
 *.tmp
 
 # ---- Docker ----
-**/.dockerignore
 docker-compose.override.yml
 .docker/
 *.tar
@@ -92,6 +91,7 @@ docker-compose.override.yml
 secrets/
 **/secrets.*
 .envrc
+!.env.example
 
 # ---- Dados locais e índices ----
 # pastas geradas durante ingestão ou indexação
