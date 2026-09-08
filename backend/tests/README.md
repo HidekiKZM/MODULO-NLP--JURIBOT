@@ -2,6 +2,16 @@
 
 ## API e ciclo de vida
 
+`test_ingestion.py` usa Qdrant em memória e embeddings determinísticos para testar
+compatibilidade, valores monetários, lotes, versões, interrupções e repetição sem
+duplicações. Não acessa as coleções persistentes nem baixa modelos.
+
+O teste manual `python -m backend.tests.smoke_ingestion` requer as dependências
+completas e um Qdrant descartável configurado por `QDRANT_HOST`/`QDRANT_URL`.
+Ele baixa a revisão fixada do modelo, gera um PDF temporário e cria uma coleção
+`juribot_validation_<UUID>` para validar busca, repetição e atualização reais.
+Não exclui a coleção criada; use um servidor de teste sem volumes de produção.
+
 Use Python 3.11 e execute na raiz:
 
 ```sh

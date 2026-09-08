@@ -80,6 +80,9 @@ O arquivo `.env` é opcional. Para personalizar, copie [`.env.example`](.env.exa
 | :--- | :--- |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | Habilitar a geração opcional; a chave deve permanecer local |
 | `EMBEDDING_MODEL` / `EMBEDDING_DEVICE` | Modelo compartilhado pela busca e ingestão; CPU por padrão |
+| `EMBEDDING_REVISION` | Commit imutável de 40 caracteres do modelo no Hugging Face, compartilhado pela ingestão e consulta |
+| `EMBEDDING_BATCH_SIZE` / `QDRANT_BATCH_SIZE` | Limites dos lotes de vetorização e gravação |
+| `DOCUMENT_NAMESPACE` | Identidade do conjunto documental; mantenha estável entre execuções |
 | `DATA_DIR` / `POPPLER_PATH` | Documentos e localização opcional dos binários Poppler |
 | `QDRANT_HOST` / `QDRANT_URL` / `QDRANT_COLLECTION` | Endereço e coleção do banco vetorial |
 | `QDRANT_TIMEOUT` / `READINESS_TIMEOUT` | Limites de espera para operações e prontidão |
@@ -96,10 +99,20 @@ A API fica restrita ao host local, e Qdrant e Redis não publicam portas no host
 Uma instalação sem índice retorna 503 em `/ready`. Para indexar PDFs existentes em `data/`, execute explicitamente:
 
 ```sh
-docker compose -f ops/docker-compose.yml exec api python -m backend.ingest.prepare_index
+docker compose -f ops/docker-compose.yml exec api python -m backend.ingest.prepare_index --collection juribot_chunks_v2
 ```
 
-A ingestão escreve no Qdrant. Use o mesmo `EMBEDDING_MODEL` da API; dimensões diferentes exigem planejar outra coleção/reindexação. A prontidão verifica dimensão e distância, mas não identifica modelos diferentes que produzam a mesma dimensão. O processo de ingestão não faz parte da inicialização automática.
+A ingestão escreve apenas na coleção explicitamente indicada. O comando acima cria uma coleção nova; a antiga `juribot_chunks` fica protegida. Coleções existentes sem o manifesto de embeddings, ou com modelo, revisão, dimensão ou métrica diferentes, são recusadas. Não há exclusão/recriação automática de coleções. Use outro nome se `juribot_chunks_v2` já pertencer a um índice incompatível.
+
+Ingestão e consulta usam o mesmo modelo e revisão fixada, normalização explícita e dimensão obtida do modelo carregado. A API verifica o manifesto antes de consultar, e `/ready` exige documentos publicados, além da compatibilidade. A revisão padrão está fixada em `1110a243fdf4706b3f48f1d95db1a4f5529b4d41`. Ao trocar o modelo, configure também o commit correto do novo repositório e construa outra coleção.
+
+Para validar uma amostra antes da indexação completa, acrescente `--file "caminho/relativo.pdf"` (repetível) ou `--limit 1`. `--no-ocr` usa apenas o texto incorporado no PDF. Depois de validar a nova coleção, altere **explicitamente** `QDRANT_COLLECTION` no `.env` da API e recrie somente a API com `docker compose -f ops/docker-compose.yml up -d --no-deps api`. A seleção da coleção antiga permanece inalterada até essa ação; índices antigos sem manifesto aparecerão como incompatíveis em `/ready`.
+
+Cada documento tem identidade derivada de `DOCUMENT_NAMESPACE` e do caminho relativo a `DATA_DIR`, independente da máquina e da página. A versão considera o hash do PDF, texto extraído, títulos e configuração de fragmentação. Repetir a ingestão mantém os mesmos IDs. Após gravar todos os lotes, um registro publica a nova versão e a limpeza remove apenas os trechos obsoletos desse documento. Falhas anteriores à publicação mantêm a versão anterior consultável; uma nova execução conclui a atualização. Os registros de controle não aparecem nas buscas.
+
+Extração ou OCR malsucedidos rejeitam o documento inteiro e são relatados; páginas sem texto também são tratadas como falha para evitar substituir um documento por uma extração parcial. Se algum documento falhar, ou nenhum for indexado, o comando encerra com código 1. Documentos que concluíram antes de outra falha permanecem publicados. PDFs removidos ou renomeados não são excluídos automaticamente do índice.
+
+Execute **um único processo de ingestão por coleção**. Há trava local por host, mas não uma trava distribuída entre máquinas/containers. A publicação é por documento, não uma transação para o corpus inteiro; uma consulta concorrente à troca de versão pode precisar ser repetida. A consulta lê os registros de versões publicadas; essa abordagem é destinada ao corpus atual e exigirá outra estratégia de filtragem em escala maior. O processo de ingestão não faz parte da inicialização automática.
 
 PDFs são montados em `/app/data`; os volumes `qdrant_data`, `redis_data` e `embedding_cache` persistem. Não use `down --volumes` para interromper o projeto. Antes de iniciar sobre uma instalação existente, mantenha o nome de projeto Compose usado anteriormente: ele determina quais volumes serão associados. O padrão agora é `juribot`; use `-p NOME_EXISTENTE` em todos os comandos se necessário, sem apagar volumes.
 
@@ -148,6 +161,6 @@ python -B -m unittest discover -s backend/tests -p "test_*.py" -v
 
 Os testes de configuração também exigem Git e Docker Compose recente com `--no-env-resolution`. Consulte [os testes da interface](backend/tests/README.md) para executar as verificações DOM. A CI executa testes Python, segurança da interface, validação Compose, build, `pip check` e imports sem rede ou credenciais.
 
-Com GNU Make instalado, `make config`, `make build`, `make up`, `make logs`, `make ingest` e `make test` usam os caminhos corretos. Para uma instalação anterior com outro nome de projeto, passe `COMPOSE_PROJECT_NAME=NOME_EXISTENTE`.
+Com GNU Make instalado, `make config`, `make build`, `make up`, `make logs`, `make ingest` e `make test` usam os caminhos corretos. `make ingest` tem como destino `juribot_chunks_v2`; use `INGEST_COLLECTION=OUTRO_NOME` para escolher outra coleção. Para uma instalação anterior com outro nome de projeto, passe `COMPOSE_PROJECT_NAME=NOME_EXISTENTE`.
 
 O perfil `--profile frontend` permite iniciar o Next.js explicitamente; seus arquivos foram preservados, mas esse fluxo ainda não foi estabilizado. Redis permanece na composição, embora não seja uma dependência da busca atual. O SDK Gemini legado e a qualidade/validação factual das respostas ainda precisam de revisão própria.

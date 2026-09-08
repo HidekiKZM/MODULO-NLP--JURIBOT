@@ -23,7 +23,9 @@ class Settings(BaseSettings):
     # Generation is optional; do not select a retired model implicitly.
     GEMINI_MODEL: str = ""
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
+    EMBEDDING_REVISION: str = Field(default="1110a243fdf4706b3f48f1d95db1a4f5529b4d41", pattern=r"^[0-9a-f]{40}$")
     EMBEDDING_DEVICE: str = "cpu"
+    EMBEDDING_BATCH_SIZE: int = Field(default=32, gt=0, le=256)
     CHUNK_SIZE: int = Field(default=1000, gt=0)
     CHUNK_OVERLAP: int = Field(default=150, ge=0)
     DATA_DIR: Path = PROJECT_ROOT / "data"
@@ -40,6 +42,7 @@ class Settings(BaseSettings):
     READINESS_TIMEOUT: float = Field(default=2, gt=0, le=10)
     QDRANT_BATCH_SIZE: int = Field(default=256, gt=0)
     QDRANT_PARALLEL: int = Field(default=2, gt=0)
+    DOCUMENT_NAMESPACE: str = Field(default="juribot", min_length=1)
 
     # Optional components do not affect readiness until integrated into the API.
     REDIS_URL: str = "redis://localhost:6379"

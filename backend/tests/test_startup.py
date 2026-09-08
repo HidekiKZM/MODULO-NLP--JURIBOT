@@ -15,13 +15,14 @@ from pydantic import ValidationError
 from backend.app_main import create_app
 from backend.core.config import PROJECT_ROOT, Settings, get_settings
 from backend.core.runtime import Runtime, create_gemini_model, create_qdrant_client, load_runtime
+from backend.rag.index_contract import identity
 
 
 class FakeModel:
     def get_sentence_embedding_dimension(self):
         return 3
 
-    def encode(self, text):
+    def encode(self, text, **kwargs):
         return SimpleNamespace(tolist=lambda: [0.1, 0.2, 0.3])
 
 
@@ -45,6 +46,13 @@ class FakeQdrant:
         if self.error:
             raise self.error
         return [SimpleNamespace(score=0.9, payload={"title": "CDC", "page": 1, "content": "Trecho de teste"})]
+
+    def retrieve(self, *args, **kwargs):
+        return [SimpleNamespace(payload=identity(Settings(_env_file=None), 3))]
+
+    def scroll(self, *args, **kwargs):
+        records = [SimpleNamespace(payload={"doc_id": "test", "version": "v1"})] if self.info.points_count else []
+        return records, None
 
     def close(self):
         self.closed = True
