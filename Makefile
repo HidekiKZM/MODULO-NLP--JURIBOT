@@ -3,6 +3,7 @@ PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE_PROJECT_NAME ?= juribot
 COMPOSE := docker compose -p $(COMPOSE_PROJECT_NAME) -f "$(PROJECT_DIR)ops/docker-compose.yml"
 PYTHON ?= python
+INGEST_COLLECTION ?= juribot_chunks_v2
 
 .PHONY: help config up down build logs logs-api logs-web shell-api ingest eval test
 help:
@@ -44,7 +45,7 @@ shell-api:
 	$(COMPOSE) exec api /bin/bash
 
 ingest:
-	$(COMPOSE) exec api python -m backend.ingest.prepare_index
+	$(COMPOSE) exec api python -m backend.ingest.prepare_index --collection $(INGEST_COLLECTION)
 
 eval:
 	$(COMPOSE) exec api python -m backend.eval.eval_runner

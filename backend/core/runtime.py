@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from backend.core.config import Settings
+from backend.rag.index_contract import IncompatibleIndex, active_filter, search_index, validate_index
 
 logger = logging.getLogger(__name__)
 
@@ -55,16 +56,11 @@ class Runtime:
             try:
                 info = self.probe.get_collection(settings.QDRANT_COLLECTION)
                 checks["qdrant"] = "ready" if self.qdrant is not None else "unavailable"
-                vectors = info.config.params.vectors
                 dimension = self.model.get_sentence_embedding_dimension() if self.model is not None else None
-                distance = getattr(vectors, "distance", None)
-                distance = getattr(distance, "value", distance)
-                if isinstance(vectors, dict) or getattr(vectors, "size", None) != dimension or str(distance).lower() != "cosine":
-                    checks["collection"] = "incompatible"
-                elif not info.points_count:
-                    checks["collection"] = "empty"
-                else:
-                    checks["collection"] = "ready"
+                validate_index(self.probe, settings.QDRANT_COLLECTION, settings, dimension, info=info)
+                checks["collection"] = "ready" if active_filter(self.probe, settings.QDRANT_COLLECTION) else "empty"
+            except IncompatibleIndex:
+                checks["collection"] = "incompatible"
             except Exception as error:
                 code = error.code() if callable(getattr(error, "code", None)) else None
                 if getattr(error, "status_code", None) == 404 or getattr(code, "name", None) == "NOT_FOUND":
@@ -78,12 +74,10 @@ class Runtime:
         if self.model is None or self.qdrant is None:
             raise SearchUnavailable("Recursos de busca indisponíveis; consulte /ready")
         try:
-            hits = self.qdrant.search(
-                collection_name=settings.QDRANT_COLLECTION,
-                query_vector=self.model.encode(query).tolist(),
-                limit=top_k,
-                with_payload=True,
-            )
+            dimension = self.model.get_sentence_embedding_dimension()
+            validate_index(self.qdrant, settings.QDRANT_COLLECTION, settings, dimension)
+            hits = search_index(self.qdrant, settings.QDRANT_COLLECTION, settings,
+                                self.model.encode(query, normalize_embeddings=True).tolist(), top_k)
             return [
                 {
                     "score": float(hit.score),

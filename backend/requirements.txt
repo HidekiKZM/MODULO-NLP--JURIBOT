@@ -13,16 +13,12 @@ rank-bm25==0.2.2
 redis==5.0.4
 
 # --- Processamento de Documentos (Ingestão) ---
-pdfplumber==0.11.0
+-r requirements-ingest.txt
 
 # -- NOVAS DEPENDÊNCIAS DE INGESTÃO --
 trafilatura==1.9.0
 beautifulsoup4==4.12.3
-langchain-text-splitters==0.2.0
-pdf2image==1.17.0
-pytesseract==0.3.10
 unstructured==0.14.4  # Já estava, mas confirmando
-ftfy==6.1.1
 
 
 # --- Observabilidade e Segurança ---

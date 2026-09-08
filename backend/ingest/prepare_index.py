@@ -1,29 +1,27 @@
-# Arquivo: backend/ingest/prepare_index.py
-
+"""PDF ingestion with immutable document versions and bounded embedding batches."""
+import argparse
 import hashlib
-import ftfy
-import re
+import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+import re
+import tempfile
 
+import ftfy
 import pdfplumber
-import requests
-import trafilatura
-from bs4 import BeautifulSoup
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pdf2image import convert_from_path
+import portalocker
 import pytesseract
 
-# Importa componentes do projeto
 from backend.core.config import get_settings
 from backend.rag.embeddings import EmbeddingGenerator
 from backend.rag.vector_qdrant import QdrantManager
 
+logger = logging.getLogger(__name__)
+PIPELINE_VERSION = "legal-text-v2"
 
-# ==========================
-# Tipos e utilitários
-# ==========================
 
 @dataclass
 class DocUnit:
@@ -31,273 +29,213 @@ class DocUnit:
     source: str
     title: str
     uri: str
-    page: Optional[int]
+    page: int
     text: str
-    extra: Dict
-
-def sha1(s: str) -> str:
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:16]
+    extra: dict
 
 
-# ==========================
-# Loaders
-# ==========================
+@dataclass
+class Document:
+    doc_id: str
+    source_hash: str
+    units: list[DocUnit]
+
+
+def file_hash(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def document_id(relative_path, namespace):
+    # Independent of machine, checkout directory, file contents and page count.
+    return hashlib.sha256(f"{namespace}:{relative_path.as_posix()}".encode("utf-8")).hexdigest()
+
 
 class PDFLoader:
-    """
-    Carrega PDFs de data_dir, extraindo texto por página.
-    Se a página tiver pouco texto, tenta OCR (se ocr=True).
-    """
-    def __init__(self, data_dir: Path, ocr: bool = True, poppler_path: Optional[str] = None):
-        self.data_dir = Path(data_dir)
+    def __init__(self, data_dir, ocr=True, poppler_path=None, namespace="juribot"):
+        self.data_dir = Path(data_dir).resolve()
         self.ocr = ocr
-        # Opcional: Definir caminho do poppler para Windows
-        self.poppler_path = poppler_path or get_settings().POPPLER_PATH
+        self.poppler_path = poppler_path
+        self.namespace = namespace
+        self.failures = []
 
-    def _extract_page_text(self, pdf: pdfplumber.PDF, page_idx: int) -> str:
+    def _ocr_page(self, path, page_num):
+        images = convert_from_path(str(path), first_page=page_num + 1, last_page=page_num + 1,
+                                   poppler_path=self.poppler_path, timeout=120)
+        if not images:
+            raise ValueError("OCR conversion returned no image")
         try:
-            page = pdf.pages[page_idx]
-            text = page.extract_text() or ""
-            return text
-        except Exception:
-            return ""
+            return pytesseract.image_to_string(images[0], lang="por+eng", timeout=120)
+        finally:
+            for image in images:
+                image.close()
 
-    def _ocr_page(self, pdf_path: Path, page_num: int) -> str:
-        """Realiza OCR da página (page_num é 0-based)."""
-        try:
-            images = convert_from_path(
-                str(pdf_path),
-                first_page=page_num + 1,
-                last_page=page_num + 1,
-                poppler_path=self.poppler_path
-            )
-            if not images:
-                return ""
-            img = images[0]
-            return pytesseract.image_to_string(img, lang="por+eng")
-        except Exception:
-            return ""
+    def load_document(self, path):
+        path = Path(path).resolve()
+        relative = path.relative_to(self.data_dir)
+        digest = file_hash(path)
+        doc_id = document_id(relative, self.namespace)
+        units = []
+        with pdfplumber.open(path) as pdf:
+            if not pdf.pages:
+                raise ValueError("PDF contains no pages")
+            for index, page in enumerate(pdf.pages):
+                extraction_error = None
+                try:
+                    text = page.extract_text() or ""
+                except Exception as error:
+                    extraction_error = error
+                    text = ""
+                    logger.warning("Extraction failed: %s page %s (%s); trying OCR",
+                                   relative, index + 1, type(error).__name__)
+                if self.ocr and (extraction_error or len(text.strip()) < 30):
+                    try:
+                        ocr_text = self._ocr_page(path, index)
+                    except Exception as error:
+                        raise ValueError(f"OCR failed: {relative} page {index + 1} ({type(error).__name__})") from error
+                    if len(ocr_text.strip()) > len(text.strip()):
+                        text = ocr_text
+                elif extraction_error:
+                    raise ValueError(f"Extraction failed: {relative} page {index + 1}") from extraction_error
+                if not text.strip():
+                    raise ValueError(f"No text extracted: {relative} page {index + 1}")
+                units.append(DocUnit(doc_id, "pdf", (pdf.metadata or {}).get("Title") or path.stem,
+                                     relative.as_posix(), index + 1, text, {"file": relative.as_posix()}))
+        if file_hash(path) != digest:
+            raise ValueError(f"PDF changed during extraction: {relative}")
+        return Document(doc_id, digest, units)
 
-    def load(self) -> List[DocUnit]:
-        docs: List[DocUnit] = []
-        if not self.data_dir.exists():
-            print(f"⚠️  Diretório de dados não existe: {self.data_dir}")
-            return docs
-
-        pdf_files = sorted(self.data_dir.rglob("*.pdf"))
-        for pdf_path in pdf_files:
+    def iter_documents(self, files=None, limit=None):
+        if not self.data_dir.is_dir():
+            raise ValueError("DATA_DIR does not exist")
+        paths = ([self.data_dir / name for name in files] if files else
+                 sorted(p for p in self.data_dir.rglob("*") if p.suffix.lower() == ".pdf"))
+        if limit is not None:
+            paths = paths[:limit]
+        if not paths:
+            raise ValueError("No PDF files found")
+        for path in paths:
             try:
-                with pdfplumber.open(pdf_path) as pdf:
-                    num_pages = len(pdf.pages)
-                    for i in range(num_pages):
-                        text = self._extract_page_text(pdf, i)
-                        # Se texto parece curto e OCR habilitado, tentar OCR
-                        if self.ocr and len((text or "").strip()) < 30:
-                            ocr_text = self._ocr_page(pdf_path, i)
-                            if len(ocr_text.strip()) > len(text.strip()):
-                                text = ocr_text
-
-                        # Pula páginas totalmente vazias
-                        if not (text and text.strip()):
-                            continue
-
-                        title = pdf.metadata.get("Title") or pdf_path.stem
-                        doc_id = sha1(f"{pdf_path.as_posix()}::{i}")
-                        docs.append(DocUnit(
-                            doc_id=doc_id,
-                            source="pdf",
-                            title=title,
-                            uri=pdf_path.as_posix(),
-                            page=i + 1,
-                            text=text,
-                            extra={"file": pdf_path.name}
-                        ))
-            except Exception as e:
-                print(f"⚠️  Falha ao ler PDF '{pdf_path}': {e}")
-        return docs
+                yield self.load_document(path)
+            except Exception as error:
+                self.failures.append({"file": path.name, "error": str(error)})
+                logger.error("Document rejected: %s (%s)", path.name, error)
 
 
-class WebLoader:
-    """
-    Carrega páginas web a partir de uma lista de URLs, usando trafilatura para extrair o texto limpo.
-    """
-    def __init__(self, urls: List[str]):
-        self.urls = urls or []
-
-    def _fetch(self, url: str) -> Optional[str]:
-        try:
-            downloaded = trafilatura.fetch_url(url, no_ssl=True)
-            if not downloaded:
-                return None
-            text = trafilatura.extract(downloaded, include_comments=False, include_tables=False)
-            return text
-        except Exception:
-            return None
-
-    def load(self) -> List[DocUnit]:
-        docs: List[DocUnit] = []
-        for url in self.urls:
-            text = self._fetch(url)
-            if not (text and text.strip()):
-                continue
-
-            # Tentar título básico via requests + BS4 (opcional)
-            title = ""
-            try:
-                resp = requests.get(url, timeout=10)
-                if resp.ok:
-                    soup = BeautifulSoup(resp.text, "html.parser")
-                    ttag = soup.find("title")
-                    title = (ttag.text or "").strip() if ttag else ""
-            except Exception:
-                pass
-
-            title = title or url
-            doc_id = sha1(url)
-            docs.append(DocUnit(
-                doc_id=doc_id,
-                source="web",
-                title=title,
-                uri=url,
-                page=None,
-                text=text,
-                extra={}
-            ))
-        return docs
-
-
-# ==========================
-# Limpeza e chunking
-# ==========================
-
-LEGAL_KEEP = "§ºª№°“”–—«»/\\"
-LEGAL_RE = re.compile(rf"[^\w\s\.\,\;\:\!\?\-\(\)\[\]\"\'\n\r{re.escape(LEGAL_KEEP)}]", re.UNICODE)
-
-def clean_legal_text(text: str) -> str:
-    """
-    Corrige mojibake/acentuação e normaliza o texto para o pipeline jurídico.
-    """
-    if not text:
-        return ""
-
-    # Corrige mojibake e normaliza acentuação (NFC)
-    text = ftfy.fix_text(text, normalization="NFC")
-
-    # Normaliza quebras de linha e espaços
+def clean_legal_text(text):
+    # Preserve printable Unicode, including %, R$, comparison/math operators and sections.
+    text = ftfy.fix_text(text or "", normalization="NFC")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[\x00-\x08\x0e-\x1f\x7f\u200b-\u200d\ufeff]", "", text)
     text = re.sub(r"[ \t\f\v]+", " ", text)
-
-    # Remove caracteres invisíveis (zero-width, BOM)
-    text = re.sub(r"[\u200B-\u200D\uFEFF]", "", text)
-
-    # Aplica o filtro de caracteres permitido (mantém acentos por causa do re.UNICODE em LEGAL_RE)
-    text = LEGAL_RE.sub("", text)
-
-    # Compacta quebras de linha extras e espaços antes de \n
-    text = re.sub(r"[ \t]+\n", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-
-    return text.strip()
-
+    text = re.sub(r" *\n", "\n", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 PREF_SEPARATORS = [
-    r"\n(?=Art\.?\s*\d+)", r"\n(?=CAP[ÍI]TULO)", r"\n(?=SEÇ[ÃA]O)", r"\n(?=T[ÍI]TULO)",
+    r"(?im:\n(?=[ \t]*(?:CAP[ÍI]TULO|T[ÍI]TULO|SE[ÇC][ÃA]O)\b))",
+    r"(?im:\n(?=[ \t]*Art(?:igo)?\.?[ \t]*\d+))",
 ]
-BASIC_SEPARATORS = ["\n\n", "\n", ". ", "; ", " "]
+BASIC_SEPARATORS = [r"\n\n", r"\n", r"\. ", r"; ", " ", ""]
 
-def make_splitter(chunk_size: int, overlap: int) -> RecursiveCharacterTextSplitter:
+
+def make_splitter(chunk_size, overlap):
     return RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=overlap,
-        length_function=len,
-        separators=PREF_SEPARATORS + BASIC_SEPARATORS + [""],
+        chunk_size=chunk_size, chunk_overlap=overlap, length_function=len,
+        separators=PREF_SEPARATORS + BASIC_SEPARATORS,
+        is_separator_regex=True, keep_separator=True,
     )
 
-def split_docs(docs: List[DocUnit], chunk_size: int, overlap: int) -> Tuple[List[str], List[Dict]]:
-    splitter = make_splitter(chunk_size, overlap)
-    out_texts: List[str] = []
-    out_payloads: List[Dict] = []
 
-    for d in docs:
-        cleaned = clean_legal_text(d.text)
+def iter_chunks(document, settings):
+    splitter = make_splitter(settings.CHUNK_SIZE, settings.CHUNK_OVERLAP)
+    for unit in document.units:
+        cleaned = clean_legal_text(unit.text)
         if not cleaned:
-            continue
-        chunks = splitter.split_text(cleaned)
-        for i, c in enumerate(chunks):
-            out_texts.append(c)
-            out_payloads.append({
-                "content": c,  # payload precisa conter o próprio conteúdo
-                "source": d.source,
-                "title": d.title,
-                "uri": d.uri,
-                "page": d.page,
-                "chunk_no": i,
-                "doc_id": d.doc_id,
-            })
-    return out_texts, out_payloads
+            raise ValueError(f"Page {unit.page} contains no indexable text")
+        for chunk in splitter.split_text(cleaned):
+            yield {"content": chunk, "source": unit.source, "title": unit.title,
+                   "uri": unit.uri, "page": unit.page}
 
 
-# ==========================
-# Pipeline principal
-# ==========================
+def document_version(document, settings):
+    description = {
+        "source_hash": document.source_hash, "pipeline": PIPELINE_VERSION,
+        "chunk_size": settings.CHUNK_SIZE, "overlap": settings.CHUNK_OVERLAP,
+        # OCR output and titles can vary without changes to the PDF bytes.
+        "pages": [(unit.page, unit.title, clean_legal_text(unit.text)) for unit in document.units],
+    }
+    return hashlib.sha256(json.dumps(description, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
-def run_ingestion():
-    """
-    Orquestra o processo completo de ingestão de documentos.
-    """
-    print("🚀 Iniciando o processo de ingestão de documentos...")
 
-    # A pasta de dados relativa à raiz do projeto (monte no Docker se for o caso)
+def embedding_batches(document, encoder, settings):
+    payloads = []
+    batch_size = min(settings.QDRANT_BATCH_SIZE, settings.EMBEDDING_BATCH_SIZE)
+    for payload in iter_chunks(document, settings):
+        payloads.append(payload)
+        if len(payloads) == batch_size:
+            yield encoder.generate_batch([p["content"] for p in payloads]), payloads
+            payloads = []
+    if payloads:
+        yield encoder.generate_batch([p["content"] for p in payloads]), payloads
+
+
+def ingest_documents(loader, manager, encoder, settings, files=None, limit=None):
+    dimension = encoder.model.get_sentence_embedding_dimension()
+    manager.ensure_collection_exists(vector_size=dimension)
+    report = {"documents": 0, "chunks": 0, "failed": []}
+    for document in loader.iter_documents(files=files, limit=limit):
+        try:
+            count = manager.publish_document(
+                document.doc_id, document_version(document, settings),
+                embedding_batches(document, encoder, settings), dimension, document.source_hash,
+            )
+            report["documents"] += 1
+            report["chunks"] += count
+        except Exception as error:
+            logger.error("Indexing failed for %s (%s)", document.doc_id, type(error).__name__)
+            report["failed"].append({"doc_id": document.doc_id, "error": type(error).__name__})
+    report["failed"].extend(loader.failures)
+    if report["documents"] == 0 or report["failed"]:
+        raise RuntimeError("Ingestion incomplete: " + json.dumps(report, ensure_ascii=False))
+    return report
+
+
+def run_ingestion(collection, *, files=None, limit=None, ocr=True):
     settings = get_settings()
-    data_path = settings.DATA_DIR
+    if not collection or collection == "juribot_chunks":
+        raise ValueError("Choose an explicit new collection; the legacy juribot_chunks is protected")
+    # Prevent overlapping writers on this host. Use one ingestion host per collection.
+    key = hashlib.sha256(f"{settings.QDRANT_URL or settings.QDRANT_HOST}:{collection}".encode()).hexdigest()
+    lock_path = Path(tempfile.gettempdir()) / f"juribot-ingest-{key}.lock"
+    with portalocker.Lock(str(lock_path), timeout=0):
+        encoder = EmbeddingGenerator(settings)
+        manager = QdrantManager(collection, settings=settings)
+        try:
+            loader = PDFLoader(settings.DATA_DIR, ocr, settings.POPPLER_PATH, settings.DOCUMENT_NAMESPACE)
+            report = ingest_documents(loader, manager, encoder, settings, files, limit)
+            print(json.dumps({"collection": collection, **report}, ensure_ascii=False))
+            return report
+        finally:
+            manager.close()
 
-    # 1) Carrega documentos
-    print(f"📂 Carregando documentos de '{data_path.resolve()}'...")
-    pdf_loader = PDFLoader(data_dir=data_path, ocr=True)
-    pdf_docs = pdf_loader.load()
-    print(f"📄 Encontrados {len(pdf_docs)} páginas de PDF.")
 
-    # Se quiser ativar web:
-    # urls = ["https://www.estrategiaconcursos.com.br/blog/cdc-codigo-defesa-consumidor/"]
-    # web_docs = WebLoader(urls).load()
-    # print(f"🌐 Encontrados {len(web_docs)} documentos da web.")
-    # all_docs = pdf_docs + web_docs
-
-    all_docs = pdf_docs
-
-    if not all_docs:
-        print("⚠️ Nenhum documento encontrado. Encerrando a ingestão.")
-        return
-
-    # 2) Limpeza e chunking
-    print("\n🔄 Limpando e dividindo documentos em chunks...")
-    texts, payloads = split_docs(
-        all_docs,
-        chunk_size=settings.CHUNK_SIZE,
-        overlap=settings.CHUNK_OVERLAP,
-    )
-    print(f"✅ Documentos divididos em {len(texts)} chunks.")
-
-    # 3) Embeddings
-    print("\n🧠 Gerando embeddings (isso pode levar um tempo)...")
-    encoder = EmbeddingGenerator()
-    embeddings = encoder.generate_batch(texts)
-    if not embeddings:
-        raise RuntimeError("Falha ao gerar embeddings (lista vazia).")
-    dim = len(embeddings[0]) if embeddings else 0
-    print(f"✅ Embeddings gerados com sucesso. Shape: ({len(embeddings)}, {dim})")
-
-    # 4) Upsert no Qdrant
-    print("\n💾 Inserindo dados no banco vetorial Qdrant...")
-    qdrant_manager = QdrantManager()
-    qdrant_manager.ensure_collection_exists(vector_size=dim)
-    qdrant_manager.upsert_points(vectors=embeddings, payloads=payloads)
-    print("✅ Dados inseridos no Qdrant com sucesso!")
-
-    print("\n🏁 Processo de ingestão concluído!")
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--collection", required=True, help="New or previously validated v2 collection")
+    parser.add_argument("--file", action="append", help="PDF path relative to DATA_DIR; repeatable")
+    parser.add_argument("--limit", type=int, help="Maximum PDFs to process")
+    parser.add_argument("--no-ocr", action="store_true", help="Only use embedded PDF text")
+    args = parser.parse_args()
+    if args.limit is not None and args.limit <= 0:
+        parser.error("--limit must be positive")
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    try:
+        run_ingestion(args.collection, files=args.file, limit=args.limit, ocr=not args.no_ocr)
+    except Exception as error:
+        logger.error("%s", error)
+        raise SystemExit(1) from error
 
 
 if __name__ == "__main__":
-    # A partir da raiz: python -m backend.ingest.prepare_index
-    run_ingestion()
+    main()
