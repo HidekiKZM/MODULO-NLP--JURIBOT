@@ -142,6 +142,28 @@
       assert(!doc.getElementById('askBtn').disabled, 'Botão permaneceu desabilitado');
     });
 
+    await test('Erros de quota e truncamento aparecem sem reutilizar resposta antiga', async () => {
+      for (const message of ['Quota excedida.', 'Resposta truncada.']) {
+        doc.getElementById('result').classList.remove('hidden');
+        ui.fetch = async () => ({ok: false, json: async () => ({detail: {message}})});
+        await ui.ask();
+        assert(doc.getElementById('status').textContent === message, 'Erro perdeu sua mensagem');
+        assert(doc.getElementById('result').classList.contains('hidden'), 'Resposta antiga permaneceu visível');
+        assert(!doc.getElementById('askBtn').disabled, 'Botão permaneceu desabilitado');
+      }
+    });
+
+    await test('Mensagem de erro maliciosa permanece texto e falha de rede tem fallback', async () => {
+      ui.fetch = async () => ({ok: false, json: async () => ({detail: {message: payload}})});
+      await ui.ask();
+      const status = doc.getElementById('status');
+      assert(status.textContent === payload && status.children.length === 0, 'Erro criou HTML ativo');
+      ui.fetch = async () => { throw new Error('sensitive-network-error'); };
+      await ui.ask();
+      assert(!status.textContent.includes('sensitive-network-error'), 'Detalhe da falha foi exposto');
+      assert(!ui.__xss, 'Código da mensagem executado');
+    });
+
     document.getElementById('summary').textContent = `${passed} passaram; ${failed} falharam.`;
     document.documentElement.dataset.testStatus = failed ? 'failed' : 'passed';
   }

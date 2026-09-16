@@ -14,7 +14,7 @@ from backend.api.routers_chat import router as chat_router
 from backend.api.routes_classify import router as classify_router
 from backend.core.config import Settings, UI_DIR, get_settings
 from backend.core.runtime import Runtime, SearchUnavailable, load_runtime
-from backend.services.router import RAGRouter
+from backend.services.chat import ChatService
 
 
 class SearchReq(BaseModel):
@@ -32,17 +32,18 @@ def create_app(
     async def lifespan(app: FastAPI):
         runtime = await run_in_threadpool(resource_loader, config)
         app.state.runtime = runtime
-        app.state.rag_router = RAGRouter(runtime.model, runtime.qdrant)
+        app.state.chat_service = ChatService(config, runtime)
         try:
             yield
         finally:
-            await run_in_threadpool(runtime.close)
+            await runtime.aclose()
             app.state.runtime = None
-            app.state.rag_router = None
+            app.state.chat_service = None
 
     app = FastAPI(title="Juribot API", version="0.1.0", lifespan=lifespan)
     app.state.settings = config
     app.state.runtime = None
+    app.state.chat_service = None
 
     # Somente interfaces locais durante a estabilização, sem cookies de terceiros.
     app.add_middleware(

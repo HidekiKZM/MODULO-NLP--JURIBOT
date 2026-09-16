@@ -9,7 +9,7 @@
 
 Assistente jurídico experimental com FastAPI, interface HTML, busca semântica em PDFs no Qdrant e geração opcional pelo Gemini. O escopo atual de estabilização é a API e `backend/ui/index.html`. O Next.js permanece em `frontend/`, fora da inicialização padrão.
 
-**Navegação:** [Tecnologias](#tecnologias) · [Arquitetura](#arquitetura) · [Docker](#docker) · [Configuração e segurança](#configuracao) · [Dados e prontidão](#dados) · [Python local](#python-local) · [Estrutura](#estrutura) · [Testes e CI](#testes)
+**Navegação:** [Tecnologias](#tecnologias) · [Arquitetura](#arquitetura) · [Docker](#docker) · [Configuração e segurança](#configuracao) · [Chat e Gemini](#chat-gemini) · [Dados e prontidão](#dados) · [Python local](#python-local) · [Estrutura](#estrutura) · [Testes e CI](#testes)
 
 ---
 
@@ -79,6 +79,9 @@ O arquivo `.env` é opcional. Para personalizar, copie [`.env.example`](.env.exa
 | Configuração | Finalidade |
 | :--- | :--- |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | Habilitar a geração opcional; a chave deve permanecer local |
+| `GEMINI_TIMEOUT_SECONDS` | Prazo total da geração, incluindo tentativas e esperas; padrão 30 s |
+| `GEMINI_MAX_OUTPUT_TOKENS` | Limite de saída por tentativa; padrão 1024 |
+| `GEMINI_MAX_ATTEMPTS` / `GEMINI_RETRY_DELAY_SECONDS` | Até duas tentativas por padrão, com espera inicial de 0,5 s |
 | `EMBEDDING_MODEL` / `EMBEDDING_DEVICE` | Modelo compartilhado pela busca e ingestão; CPU por padrão |
 | `EMBEDDING_REVISION` | Commit imutável de 40 caracteres do modelo no Hugging Face, compartilhado pela ingestão e consulta |
 | `EMBEDDING_BATCH_SIZE` / `QDRANT_BATCH_SIZE` | Limites dos lotes de vetorização e gravação |
@@ -88,6 +91,40 @@ O arquivo `.env` é opcional. Para personalizar, copie [`.env.example`](.env.exa
 | `QDRANT_TIMEOUT` / `READINESS_TIMEOUT` | Limites de espera para operações e prontidão |
 
 A API fica restrita ao host local, e Qdrant e Redis não publicam portas no host. O CORS aceita apenas as origens locais explícitas. A interface apresenta o conteúdo da IA como texto e rejeita links de fontes com protocolos perigosos. As regras de Git e dos contextos de build excluem segredos; `.env.example` contém apenas valores de exemplo sem credenciais.
+
+<a id="chat-gemini"></a>
+## 💬 Chat e integração Gemini
+
+`backend/services/chat.py` concentra o fluxo usado por `/chat` e `/chat/`: decisão de roteamento, recuperação de fontes, construção das instruções e geração. O antigo `RAGPipeline` foi explicitamente desativado e falha com orientação para usar esse serviço; não carrega outro modelo ou cliente. Streaming ainda não é suportado.
+
+A integração usa **`google-genai==2.23.0`**, em substituição a `google-generativeai`. A documentação oficial, consultada em **15/09/2026**, recomenda o [Google GenAI SDK](https://ai.google.dev/gemini-api/docs/libraries) e lista [`gemini-3.8-flash` como estável](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash). A versão fixada do [SDK Python](https://github.com/googleapis/python-genai) requer Pydantic 2.12.5 ou superior; o projeto usa 2.12.5. O acesso ao modelo depende da conta e da quota: configure `GEMINI_MODEL` explicitamente. Sem chave, o chat continua em modo de fontes, com `generation.status=disabled`.
+
+O cliente é criado no ciclo de vida da API e fechado no encerramento. Não há chamada Gemini durante importação ou `/ready`: a prontidão verifica configuração local, não saldo de quota nem disponibilidade do provedor. O gerador usa prazo total cancelável, timeout de transporte, um candidato e limite de saída. As tentativas automáticas internas do SDK ficam desabilitadas para não multiplicar o limite configurado; somente falhas transitórias de transporte e HTTP 408/500/502/503/504 podem ser repetidas. Quota, bloqueio, truncamento e configuração inválida não são repetidos.
+
+Somente respostas textuais não vazias, encerradas com `STOP`, são aceitas. Conteúdo parcial, pensamentos internos e chamadas de ferramentas não são apresentados como resposta final. As falhas retornam `detail.code`, `detail.message` e `detail.retryable`, sem mensagens internas do provedor, chave ou prompt:
+
+| Situação | HTTP | Código |
+| :--- | :--- | :--- |
+| Serviço temporariamente indisponível | 503 | `gemini_unavailable` |
+| Quota ou limite de requisições excedido | 429 | `gemini_quota_exceeded` |
+| Bloqueio de conteúdo | 422 | `gemini_blocked` |
+| Resposta truncada pelo limite de saída | 502 | `gemini_truncated` |
+| Prazo de geração excedido | 504 | `gemini_timeout` |
+| Resposta vazia ou formato inesperado | 502 | `gemini_invalid_response` |
+| Chave/modelo/configuração recusados | 503 | `gemini_configuration` |
+| Falha na recuperação das fontes | 503 | `search_unavailable` |
+
+O HTML mostra a mensagem como texto e oculta a resposta anterior em caso de erro. O cliente da API deve verificar o status HTTP antes de tratar uma resposta como sucesso.
+
+### Teste real controlado, somente após autorização
+
+Os testes automatizados simulam as respostas e não usam a API real. Para uma verificação real autorizada, configure a chave **apenas no `.env` local** ou no ambiente e execute:
+
+```sh
+python -m backend.scripts.smoke_gemini --authorize-api-call --model gemini-3.8-flash
+```
+
+Esse comando envia somente **“Responda apenas com a palavra OK.”**, com uma instrução técnica breve, até **256 tokens de saída**, prazo de **15 segundos** e **uma única tentativa**. Não lê PDFs nem consulta o Qdrant. A chamada pode consumir quota/créditos; o script exibe apenas resultado, modelo e contagem de tokens, nunca a chave. A flag não substitui a autorização do responsável pela API.
 
 <a id="dados"></a>
 ## 📚 Dados e prontidão
@@ -141,6 +178,8 @@ A API local precisa de Qdrant acessível no endereço configurado. O Compose pad
 | `backend/app_main.py` | Aplicação, ciclo de vida, rotas e saúde |
 | `backend/core/config.py` | Configuração única e validação |
 | `backend/core/runtime.py` | Recursos, busca e prontidão |
+| `backend/services/chat.py` | Serviço único de chat |
+| `backend/rag/generator_gemini.py` | SDK Gemini, limites e validação das respostas |
 | `backend/api/` | Chat e classificação |
 | `backend/rag/` | Embeddings e componentes de recuperação |
 | `backend/ingest/` | Extração, fragmentação e indexação |
@@ -163,4 +202,4 @@ Os testes de configuração também exigem Git e Docker Compose recente com `--n
 
 Com GNU Make instalado, `make config`, `make build`, `make up`, `make logs`, `make ingest` e `make test` usam os caminhos corretos. `make ingest` tem como destino `juribot_chunks_v2`; use `INGEST_COLLECTION=OUTRO_NOME` para escolher outra coleção. Para uma instalação anterior com outro nome de projeto, passe `COMPOSE_PROJECT_NAME=NOME_EXISTENTE`.
 
-O perfil `--profile frontend` permite iniciar o Next.js explicitamente; seus arquivos foram preservados, mas esse fluxo ainda não foi estabilizado. Redis permanece na composição, embora não seja uma dependência da busca atual. O SDK Gemini legado e a qualidade/validação factual das respostas ainda precisam de revisão própria.
+O perfil `--profile frontend` permite iniciar o Next.js explicitamente; seus arquivos foram preservados, mas esse fluxo ainda não foi estabilizado. Redis permanece na composição, embora não seja uma dependência da busca atual. A validação de status e formato da resposta não garante correção jurídica ou suporte factual das citações; essa avaliação ainda precisa de revisão própria.

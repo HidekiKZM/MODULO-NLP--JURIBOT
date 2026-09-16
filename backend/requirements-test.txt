@@ -1,3 +1,4 @@
 -r requirements-api.txt
 -r requirements-ingest.txt
+-r requirements-gemini.txt
 httpx==0.28.1

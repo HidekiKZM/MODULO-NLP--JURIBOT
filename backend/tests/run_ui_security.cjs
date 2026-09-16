@@ -23,7 +23,7 @@ const harness = new JSDOM(fs.readFileSync(path.join(__dirname, 'ui_security.html
     console.log(harness.window.document.getElementById('summary').textContent);
     for (const item of harness.window.document.querySelectorAll('#results li')) console.log(item.textContent);
     assert.equal(harness.window.document.documentElement.dataset.testStatus, 'passed');
-    assert.equal(harness.window.document.querySelectorAll('#results li').length, 9);
+    assert.equal(harness.window.document.querySelectorAll('#results li').length, 11);
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;
