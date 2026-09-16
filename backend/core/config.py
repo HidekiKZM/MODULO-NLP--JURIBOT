@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: SecretStr = SecretStr("")
     # Generation is optional; do not select a retired model implicitly.
     GEMINI_MODEL: str = ""
+    GEMINI_TIMEOUT_SECONDS: float = Field(default=30, gt=0, le=120, allow_inf_nan=False)
+    GEMINI_MAX_OUTPUT_TOKENS: int = Field(default=1024, ge=1, le=8192)
+    GEMINI_MAX_ATTEMPTS: int = Field(default=2, ge=1, le=3)
+    GEMINI_RETRY_DELAY_SECONDS: float = Field(default=0.5, ge=0, le=5, allow_inf_nan=False)
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
     EMBEDDING_REVISION: str = Field(default="1110a243fdf4706b3f48f1d95db1a4f5529b4d41", pattern=r"^[0-9a-f]{40}$")
     EMBEDDING_DEVICE: str = "cpu"

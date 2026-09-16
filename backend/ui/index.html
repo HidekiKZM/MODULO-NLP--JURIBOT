@@ -157,8 +157,14 @@
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ question: q, top_k: topk })
         });
-        if (!resp.ok) throw new Error('Falha na requisição');
         const data = await resp.json();
+        if (!resp.ok) {
+          const message = data && data.detail && typeof data.detail.message === 'string'
+            ? data.detail.message : 'Não foi possível concluir a consulta.';
+          el('status').textContent = message;
+          el('result').classList.add('hidden');
+          return;
+        }
 
         const sources = Array.isArray(data.sources) ? data.sources : [];
         renderSources(sources);
@@ -167,9 +173,8 @@
         el('result').classList.remove('hidden');
         el('status').textContent = 'Pronto.';
       } catch (e) {
-        console.error(e);
-        el('status').textContent = 'Erro ao consultar.';
-        alert('Erro ao consultar o /chat. Veja o console.');
+        el('result').classList.add('hidden');
+        el('status').textContent = 'Não foi possível comunicar com o serviço de chat.';
       } finally {
         el('askBtn').disabled = false;
       }

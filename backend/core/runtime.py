@@ -23,12 +23,10 @@ def create_qdrant_client(settings: Settings, *, probe: bool = False):
     )
 
 
-def create_gemini_model(settings: Settings):
-    key, model_name = settings.require_gemini()
-    import google.generativeai as genai
-
-    genai.configure(api_key=key)
-    return genai.GenerativeModel(model_name)
+def create_gemini_generator(settings: Settings):
+    settings.require_gemini()
+    from backend.rag.generator_gemini import GeminiGenerator
+    return GeminiGenerator(settings)
 
 
 class SearchUnavailable(RuntimeError):
@@ -101,6 +99,16 @@ class Runtime:
                     logger.warning("Falha ao fechar cliente (%s)", type(error).__name__)
         self.model = self.qdrant = self.probe = self.gemini = None
 
+    async def aclose(self):
+        from fastapi.concurrency import run_in_threadpool
+        try:
+            if self.gemini is not None:
+                await self.gemini.aclose()
+        except Exception as error:
+            logger.warning("Falha ao fechar Gemini (%s)", type(error).__name__)
+        finally:
+            await run_in_threadpool(self.close)
+
 
 def load_runtime(settings: Settings) -> Runtime:
     from backend.rag.embeddings import load_embedding_model
@@ -112,7 +120,7 @@ def load_runtime(settings: Settings) -> Runtime:
         "probe": lambda: create_qdrant_client(settings, probe=True),
     }
     if settings.gemini_enabled:
-        factories["gemini"] = lambda: create_gemini_model(settings)
+        factories["gemini"] = lambda: create_gemini_generator(settings)
     for name, factory in factories.items():
         try:
             setattr(runtime, name, factory())

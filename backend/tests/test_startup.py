@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from backend.app_main import create_app
 from backend.core.config import PROJECT_ROOT, Settings, get_settings
-from backend.core.runtime import Runtime, create_gemini_model, create_qdrant_client, load_runtime
+from backend.core.runtime import Runtime, create_gemini_generator, create_qdrant_client, load_runtime
 from backend.rag.index_contract import identity
 
 
@@ -201,7 +201,7 @@ class StartupTests(unittest.TestCase):
     def test_resource_initialization_failure_is_visible_without_hiding_routes(self):
         with patch("backend.rag.embeddings.load_embedding_model", side_effect=OSError("download failed")), \
              patch("backend.core.runtime.create_qdrant_client", side_effect=[self.qdrant, self.probe]), \
-             patch("backend.core.runtime.create_gemini_model") as gemini:
+             patch("backend.core.runtime.create_gemini_generator") as gemini:
             runtime = load_runtime(self.config)
         gemini.assert_not_called()
         self.assertIsNone(runtime.model)
@@ -261,7 +261,7 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "GEMINI_MODEL"):
             settings.require_gemini()
         with self.assertRaisesRegex(ValueError, "GEMINI_API_KEY"):
-            create_gemini_model(Settings(_env_file=None))
+            create_gemini_generator(Settings(_env_file=None))
 
     def test_invalid_configuration_fails_early(self):
         for values in [{"QDRANT_PORT": 0}, {"CHUNK_SIZE": 100, "CHUNK_OVERLAP": 150}, {"READINESS_TIMEOUT": 0}]:
@@ -288,7 +288,7 @@ class ImportTests(unittest.TestCase):
                                   capture_output=True, text=True, timeout=20)
 
     def test_import_does_not_load_models_or_gemini_sdk(self):
-        result = self.run_python("import sys; import backend.app_main; assert 'sentence_transformers' not in sys.modules; assert 'google.generativeai' not in sys.modules")
+        result = self.run_python("import sys; import backend.app_main; assert 'sentence_transformers' not in sys.modules; assert 'google.genai' not in sys.modules")
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_broken_router_import_is_fatal(self):

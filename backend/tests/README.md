@@ -2,6 +2,12 @@
 
 ## API e ciclo de vida
 
+`test_chat.py` simula sucesso, quota, indisponibilidade, bloqueio, truncamento,
+resposta vazia, timeout e cancelamento. Usa também o SDK real com transporte HTTP
+simulado para verificar o limite de tentativas sem acessar o Gemini.
+O teste real `backend.scripts.smoke_gemini` é manual e exige autorização explícita;
+ele nunca é executado pela CI. Consulte seus limites no README principal.
+
 `test_ingestion.py` usa Qdrant em memória e embeddings determinísticos para testar
 compatibilidade, valores monetários, lotes, versões, interrupções e repetição sem
 duplicações. Não acessa as coleções persistentes nem baixa modelos.
@@ -24,7 +30,7 @@ alterar o Qdrant. Cobrem rotas, imports, configuração, CORS, fechamento dos
 clientes e prontidão com falhas de dependências. A CI também constrói a imagem
 completa e verifica suas dependências e imports sem rede.
 
-Para executar os nove casos da interface em jsdom, instale `jsdom@26.1.0` em
+Para executar os onze casos da interface em jsdom, instale `jsdom@26.1.0` em
 uma pasta temporária, defina `NODE_PATH` para seu `node_modules` e execute
 `node backend/tests/run_ui_security.cjs`. Esse teste automatizado não substitui
 a conferência visual em navegador descrita abaixo.
@@ -55,7 +61,7 @@ python -B backend/tests/serve_ui_security.py
 ```
 
 Abra <http://127.0.0.1:8765/tests/ui_security.html>. O resultado esperado é
-`9 passaram; 0 falharam.` Encerre o servidor com Ctrl+C.
+`11 passaram; 0 falharam.` Encerre o servidor com Ctrl+C.
 
 O servidor de teste disponibiliza apenas a página de testes e o HTML da interface,
 em loopback. Os testes usam o DOM real do navegador, removem o script externo de
